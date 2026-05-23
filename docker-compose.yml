@@ -2,5 +2,5 @@ services:
   web:
     image: ${DOCKER_IMAGE:-manashkin/cd_docker_project:latest}
     ports:
-      - "80:5000"
+      - "8080:5000"
     restart: unless-stopped
