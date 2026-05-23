@@ -48,17 +48,42 @@ jobs:
 
       - name: Подготовить SSH ключ
         env:
+          SSH_PRIVATE_KEY_B64: ${{ secrets.SSH_PRIVATE_KEY_B64 }}
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          test -n "${SSH_PRIVATE_KEY:-}" || { echo "::error::SSH_PRIVATE_KEY пустой"; exit 1; }
           mkdir -p "$HOME/.ssh"
           chmod 700 "$HOME/.ssh"
-          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/gh_deploy.pem"
-          tr -d '\r' < "$HOME/.ssh/gh_deploy.pem" > "$HOME/.ssh/gh_deploy.unix"
-          mv "$HOME/.ssh/gh_deploy.unix" "$HOME/.ssh/gh_deploy.pem"
-          chmod 600 "$HOME/.ssh/gh_deploy.pem"
-          ssh-keygen -y -f "$HOME/.ssh/gh_deploy.pem" >/dev/null
+          python3 <<'PYCODE'
+          import os, base64, pathlib, subprocess, sys
+
+          pem = pathlib.Path.home() / ".ssh" / "gh_deploy.pem"
+          raw_b64 = (os.environ.get("SSH_PRIVATE_KEY_B64") or "").strip().replace("\n", "").replace(" ", "")
+          raw_plain = os.environ.get("SSH_PRIVATE_KEY") or ""
+
+          if raw_b64:
+              try:
+                  data = base64.b64decode(raw_b64)
+              except Exception as exc:
+                  print(f"::error::SSH_PRIVATE_KEY_B64 не декодируется: {exc}")
+                  sys.exit(1)
+          elif raw_plain.strip():
+              txt = raw_plain.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff").rstrip("\n") + "\n"
+              data = txt.encode("utf-8")
+          else:
+              print("::error::Нужен секрет SSH_PRIVATE_KEY_B64 (рекомендуется) или SSH_PRIVATE_KEY.")
+              sys.exit(1)
+
+          pem.write_bytes(data)
+          pem.chmod(0o600)
+          try:
+              subprocess.run(["ssh-keygen", "-y", "-f", str(pem)], check=True, stdout=subprocess.DEVNULL)
+          except subprocess.CalledProcessError:
+              print("::error::Ключ после записи недействителен (libcrypto). "
+                    "Чаще всего секрет содержимое испорчено — используйте SSH_PRIVATE_KEY_B64 на сервере: "
+                    "base64 -w0 ~/.ssh/gh_deploy.pem")
+              sys.exit(1)
+          PYCODE
 
       - name: Загрузить docker-compose.yml на сервер
         uses: appleboy/scp-action@v1
