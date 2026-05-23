@@ -46,44 +46,31 @@ jobs:
         with:
           token: ${{ secrets.GH_CHECKOUT_TOKEN != '' && secrets.GH_CHECKOUT_TOKEN || github.token }}
 
-      - name: Подготовить SSH ключ
+      # Только секрет SSH_PRIVATE_KEY_B64 (одна строка). Многострочный PEM в секретах GitHub без base64 здесь не используйте — ломается.
+      - name: Подготовить SSH ключ (из Base64)
         env:
           SSH_PRIVATE_KEY_B64: ${{ secrets.SSH_PRIVATE_KEY_B64 }}
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
+          PEM="$HOME/.ssh/gh_deploy.pem"
           mkdir -p "$HOME/.ssh"
           chmod 700 "$HOME/.ssh"
-          python3 <<'PYCODE'
-          import os, base64, pathlib, subprocess, sys
-
-          pem = pathlib.Path.home() / ".ssh" / "gh_deploy.pem"
-          raw_b64 = (os.environ.get("SSH_PRIVATE_KEY_B64") or "").strip().replace("\n", "").replace(" ", "")
-          raw_plain = os.environ.get("SSH_PRIVATE_KEY") or ""
-
-          if raw_b64:
-              try:
-                  data = base64.b64decode(raw_b64)
-              except Exception as exc:
-                  print(f"::error::SSH_PRIVATE_KEY_B64 не декодируется: {exc}")
-                  sys.exit(1)
-          elif raw_plain.strip():
-              txt = raw_plain.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff").rstrip("\n") + "\n"
-              data = txt.encode("utf-8")
-          else:
-              print("::error::Нужен секрет SSH_PRIVATE_KEY_B64 (рекомендуется) или SSH_PRIVATE_KEY.")
-              sys.exit(1)
-
-          pem.write_bytes(data)
-          pem.chmod(0o600)
-          try:
-              subprocess.run(["ssh-keygen", "-y", "-f", str(pem)], check=True, stdout=subprocess.DEVNULL)
-          except subprocess.CalledProcessError:
-              print("::error::Ключ после записи недействителен (libcrypto). "
-                    "Чаще всего секрет содержимое испорчено — используйте SSH_PRIVATE_KEY_B64 на сервере: "
-                    "base64 -w0 ~/.ssh/gh_deploy.pem")
-              sys.exit(1)
-          PYCODE
+          if [ -z "${SSH_PRIVATE_KEY_B64:-}" ]; then
+            echo "::error::Секрет SSH_PRIVATE_KEY_B64 не задан или пустой."
+            echo "::error::На сервере выполните:  base64 -w0 ~/.ssh/github_actions"
+            echo "::error::(если файл ключа другой — подставьте его путь) и вставьте ВСЮ выводную строку в GitHub Secrets."
+            exit 1
+          fi
+          if ! printf '%s' "$SSH_PRIVATE_KEY_B64" | tr -d ' \t\n\r' | base64 --decode > "$PEM"; then
+            echo "::error::Не удалось Base64-декодировать SSH_PRIVATE_KEY_B64. Переснимите строку без пробелов и переносов."
+            exit 1
+          fi
+          chmod 600 "$PEM"
+          if ! ssh-keygen -y -f "$PEM" >/dev/null 2>&1; then
+            echo "::error::После декодирования файл не является действительным ключом."
+            echo "::error::На сервере снова: base64 -w0 ~/.ssh/github_actions → полностью замените значение секрета SSH_PRIVATE_KEY_B64 на GitHub."
+            exit 1
+          fi
 
       - name: Загрузить docker-compose.yml на сервер
         uses: appleboy/scp-action@v1
